@@ -271,8 +271,15 @@ async function saveShared(data) {
       },
       body: JSON.stringify({ data, updated_at: new Date().toISOString() }),
     });
-    if (!r.ok) console.error('saveShared HTTP', r.status, await r.text());
-  } catch (e) { console.error('saveShared', e); }
+    if (!r.ok) {
+      console.error('saveShared HTTP', r.status, await r.text());
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('saveShared', e);
+    return false;
+  }
 }
 
 // loadMe / saveMe: cadastro do apostador, fica só no navegador dele (por dispositivo)
@@ -2059,7 +2066,7 @@ function OddsTab({ state, updateState }) {
           ...m,
           odds: {
             ...m.odds,
-            [market]: { ...m.odds[market], [key]: value === '' ? '' : parseFloat(value) || 0 }
+            [market]: { ...m.odds[market], [key]: value }
           }
         } : m),
       }
@@ -2128,16 +2135,63 @@ function OddsTab({ state, updateState }) {
   );
 }
 
+function OddInputCell({ label, value, onCommit, inputStyle }) {
+  // Mantém o texto digitado localmente (aceita "1.", "1.4", etc.)
+  // e só converte pra número quando o campo perde o foco.
+  const [text, setText] = useState(value == null || value === '' ? '' : String(value));
+
+  // Se o valor de fora mudar (ex: reset), sincroniza
+  useEffect(() => {
+    setText(value == null || value === '' ? '' : String(value));
+  }, [value]);
+
+  const handleChange = (e) => {
+    // Aceita só números, ponto e vírgula. Vírgula vira ponto.
+    let v = e.target.value.replace(',', '.').replace(/[^0-9.]/g, '');
+    // Não deixa ter mais de um ponto
+    const parts = v.split('.');
+    if (parts.length > 2) v = parts[0] + '.' + parts.slice(1).join('');
+    setText(v);
+  };
+
+  const handleBlur = () => {
+    if (text === '' || text === '.') {
+      onCommit('');
+      setText('');
+      return;
+    }
+    const num = parseFloat(text);
+    if (isNaN(num)) {
+      onCommit('');
+      setText('');
+    } else {
+      onCommit(num);
+      setText(String(num));
+    }
+  };
+
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap: 4 }}>
+      <span style={{ fontSize: 10, color: C.textDim, minWidth: 32 }}>{label}</span>
+      <input
+        value={text}
+        onChange={handleChange}
+        onBlur={handleBlur}
+        inputMode="decimal"
+        placeholder="—"
+        style={inputStyle}
+      />
+    </div>
+  );
+}
+
 function OddEditRow({ label, cols, inputStyle }) {
   return (
     <div style={{ marginBottom: 8 }}>
       <div style={{ fontSize: 10, color: C.textMuted, textTransform:'uppercase', letterSpacing:'0.08em', marginBottom: 3, fontWeight:500 }}>{label}</div>
       <div style={{ display:'flex', gap: 6, alignItems:'center' }}>
         {cols.map(([lbl, val, onChange], i) => (
-          <div key={i} style={{ display:'flex', alignItems:'center', gap: 4 }}>
-            <span style={{ fontSize: 10, color: C.textDim, minWidth: 32 }}>{lbl}</span>
-            <input value={val ?? ''} onChange={e => onChange(e.target.value.replace(',', '.'))} style={inputStyle} />
-          </div>
+          <OddInputCell key={i} label={lbl} value={val} onCommit={onChange} inputStyle={inputStyle} />
         ))}
       </div>
     </div>
@@ -2298,18 +2352,35 @@ export default function App() {
 
   const handleOnboard = async (data) => {
     const newBettor = { id: newId('u_'), ...data, createdAt: new Date().toISOString() };
-    // Check if cpf+phone already exists
-    const fresh = (await loadShared()) || state;
-    const existing = fresh.bettors.find(b => b.cpf === data.cpf && b.phone === data.phone);
+    // Carrega o estado mais recente do banco
+    const fresh = await loadShared();
+    if (!fresh) {
+      alert('Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.');
+      return;
+    }
+    // Já existe esse cpf+telefone?
+    const existing = (fresh.bettors || []).find(b => b.cpf === data.cpf && b.phone === data.phone);
     let bettor;
     if (existing) {
       bettor = existing;
-    } else {
-      bettor = newBettor;
-      const updated = { ...fresh, bettors: [...fresh.bettors, newBettor] };
-      await saveShared(updated);
-      setState(updated);
+      // Garante que o cadastro local aponta pro apostador certo
+      await saveMe(bettor);
+      setMe(bettor);
+      setState(fresh);
+      return;
     }
+    // Novo apostador: adiciona e salva
+    bettor = newBettor;
+    const updated = { ...fresh, bettors: [...(fresh.bettors || []), newBettor] };
+    await saveShared(updated);
+    // Confirma que realmente gravou no banco antes de prosseguir
+    const verify = await loadShared();
+    const saved = verify && (verify.bettors || []).some(b => b.id === newBettor.id);
+    if (!saved) {
+      alert('Erro ao salvar seu cadastro no servidor. Tente novamente em alguns segundos.');
+      return;
+    }
+    setState(verify);
     await saveMe(bettor);
     setMe(bettor);
   };
