@@ -18,7 +18,7 @@ const C = {
 
 // --- Supabase (banco de dados na nuvem) ---
 const SUPABASE_URL = 'https://spxpzkodexepbbmajwee.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_qg43OytcPfHDZZ1skbeAXw_NabREWZ_';
+const SUPABASE_KEY = 'sb_publishable_F0Yb-gtn-Ry1_dI95TCnhg_PjWVjSrg';
 const STATE_ROW_ID = 'main';
 const STORAGE_LOCAL = 'dnbet_me_v1';
 const ADMIN_PASSWORD = 'Pacote@2004';
