@@ -1182,7 +1182,7 @@ function Cart({ cart, onRemove, onClear, onClose, onConfirm, state, me }) {
 // =========================================================================
 // PAYMENT SCREEN
 // =========================================================================
-function PaymentScreen({ bet, settings, onBack, onCancel }) {
+function PaymentScreen({ bet, settings, me, onBack, onCancel }) {
   const [copied, setCopied] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [remaining, setRemaining] = useState(() => {
@@ -1208,7 +1208,7 @@ function PaymentScreen({ bet, settings, onBack, onCancel }) {
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const waMsg = encodeURIComponent(`Olá! Comprovante do PIX para aposta *#${bet.id}* de ${fmtMoney(bet.stake * bet.betCount)}. Vou anexar o comprovante na próxima mensagem.`);
+  const waMsg = encodeURIComponent(`Olá! Comprovante do PIX para a aposta *#${bet.id}* — ${me?.name || ''} — valor ${fmtMoney(bet.stake * bet.betCount)}. Vou anexar o comprovante na próxima mensagem.`);
   const waUrl = `https://wa.me/${settings.whatsapp}?text=${waMsg}`;
 
   return (
@@ -1221,6 +1221,7 @@ function PaymentScreen({ bet, settings, onBack, onCancel }) {
         <div style={{ textAlign:'center', marginBottom: 20 }}>
           <div style={{ fontSize: 11, color: C.textMuted, textTransform:'uppercase', letterSpacing:'0.18em', marginBottom: 4 }}>Aposta confirmada</div>
           <div style={{ fontSize: 32, fontWeight: 700, color: C.text, fontFamily:'monospace', letterSpacing:'0.06em' }}>#{bet.id}</div>
+          {me?.name && <div style={{ fontSize: 14, color: C.accent, fontWeight: 600, marginTop: 2 }}>{me.name}</div>}
           {expired ? (
             <Pill color="red">Expirada</Pill>
           ) : (
@@ -1336,7 +1337,7 @@ function MyBets({ state, me, settings, onBack, onCancel }) {
     }
   };
 
-  const waMsg = (bet) => encodeURIComponent(`Olá! Comprovante do PIX para aposta *#${bet.id}* de ${fmtMoney(bet.stake * bet.betCount)}.`);
+  const waMsg = (bet) => encodeURIComponent(`Olá! Comprovante do PIX para a aposta *#${bet.id}* — ${me?.name || ''} — valor ${fmtMoney(bet.stake * bet.betCount)}.`);
 
   return (
     <div style={{ minHeight: '100vh', background: C.bg, padding: '14px 16px' }}>
@@ -1499,7 +1500,7 @@ function BettorApp({ me, state, setState, onLogout, onAdminEnter }) {
   };
 
   if (view === 'payment' && currentBet) {
-    return <PaymentScreen bet={currentBet} settings={state.settings}
+    return <PaymentScreen bet={currentBet} settings={state.settings} me={me}
       onBack={() => { setCurrentBet(null); setView('catalog'); }}
       onCancel={async () => { await cancelMyBet(currentBet.id); setCurrentBet(null); setView('catalog'); }}
     />;
@@ -1687,8 +1688,11 @@ function PendingPaymentsTab({ state, updateState }) {
           <div key={bet.id} style={{ background: C.surface, border:`1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 10 }}>
             <div style={{ display:'flex', justifyContent:'space-between', marginBottom: 8 }}>
               <div>
-                <div style={{ fontFamily:'monospace', fontSize: 14, color: C.text, fontWeight: 700, letterSpacing:'0.04em' }}>#{bet.id}</div>
-                <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{b?.name} · {maskPhone(b?.phone || '')} · {maskCpf(b?.cpf || '')}</div>
+                <div style={{ display:'flex', alignItems:'baseline', gap: 8, flexWrap:'wrap' }}>
+                  <span style={{ fontFamily:'monospace', fontSize: 14, color: C.text, fontWeight: 700, letterSpacing:'0.04em' }}>#{bet.id}</span>
+                  <span style={{ fontSize: 14, color: C.accent, fontWeight: 600 }}>{b?.name || '—'}</span>
+                </div>
+                <div style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{maskPhone(b?.phone || '')} · {maskCpf(b?.cpf || '')}</div>
               </div>
               <div style={{ textAlign:'right' }}>
                 <div style={{ color: C.warning, fontSize: 12, fontWeight: 600 }}><Clock size={12} style={{ verticalAlign:'-1px', marginRight: 3 }} />{String(mm).padStart(2,'0')}:{String(ss).padStart(2,'0')}</div>
@@ -1992,13 +1996,14 @@ function AllBetsTab({ state, updateState }) {
         return (
           <div key={bet.id} style={{ background: C.surface, border:`1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 8 }}>
             <div style={{ display:'flex', justifyContent:'space-between', marginBottom: 6 }}>
-              <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
+              <div style={{ display:'flex', alignItems:'center', gap: 8, flexWrap:'wrap' }}>
                 <span style={{ fontFamily:'monospace', fontSize: 12, color: C.text, fontWeight: 700 }}>#{bet.id}</span>
+                <span style={{ fontSize: 13, color: C.accent, fontWeight: 600 }}>{b?.name || '—'}</span>
                 <Pill color={si.color}>{si.label}</Pill>
               </div>
               <span style={{ fontSize: 10, color: C.textDim }}>{new Date(bet.createdAt).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</span>
             </div>
-            <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 6 }}>{b?.name} · {maskPhone(b?.phone || '')}</div>
+            <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 6 }}>{maskPhone(b?.phone || '')}</div>
             {bet.selections.map((s, i) => (
               <div key={i} style={{ fontSize: 11, color: C.textMuted, marginBottom: 2 }}>{s.label} <span style={{ color: C.accent, fontWeight: 600 }}>{fmtOdd(s.odd)}</span></div>
             ))}
