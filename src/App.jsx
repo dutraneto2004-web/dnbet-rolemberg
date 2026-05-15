@@ -282,6 +282,57 @@ async function saveShared(data) {
   }
 }
 
+// --- RPC: chamadas atômicas para operações concorrentes ---
+async function callRpc(fnName, body) {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fnName}`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      console.error(`RPC ${fnName} HTTP`, r.status, t);
+      return { ok: false, error: t };
+    }
+    const data = await r.json().catch(() => null);
+    return { ok: true, data };
+  } catch (e) {
+    console.error(`RPC ${fnName}`, e);
+    return { ok: false, error: String(e) };
+  }
+}
+
+// Adiciona apostador atomicamente. Retorna o apostador (novo OU existente se cpf+phone bateu).
+async function rpcAddBettor(newBettor) {
+  const res = await callRpc('add_bettor', { new_bettor: newBettor });
+  if (!res.ok) return null;
+  return res.data;
+}
+
+// Adiciona um array de apostas atomicamente
+async function rpcAddBets(newBets) {
+  const res = await callRpc('add_bets', { new_bets: newBets });
+  return res.ok;
+}
+
+// Atualiza status de uma aposta atomicamente
+async function rpcUpdateBetStatus(betId, newStatus, extraFields = {}) {
+  const res = await callRpc('update_bet_status', { bet_id: betId, new_status: newStatus, extra_fields: extraFields });
+  return res.ok;
+}
+
+// Expira em lote as apostas pending_payment cujo prazo passou
+async function rpcExpireBets(betIds, settledAtIso) {
+  if (!betIds || betIds.length === 0) return true;
+  const res = await callRpc('expire_bets', { bet_ids: betIds, settled_at_iso: settledAtIso });
+  return res.ok;
+}
+
 // loadMe / saveMe: cadastro do apostador, fica só no navegador dele (por dispositivo)
 async function loadMe() {
   try {
@@ -1460,13 +1511,13 @@ function BettorApp({ me, state, setState, onLogout, onAdminEnter }) {
   const removeFromCart = (uid) => setCart(c => c.filter(s => s.uid !== uid));
 
   const cancelMyBet = async (betId) => {
-    const fresh = (await loadShared()) || state;
-    const updated = {
-      ...fresh,
-      bets: fresh.bets.map(b => b.id === betId ? { ...b, status: 'cancelled', settledAt: new Date().toISOString() } : b)
-    };
-    await saveShared(updated);
-    setState(updated);
+    const ok = await rpcUpdateBetStatus(betId, 'cancelled', { settledAt: new Date().toISOString() });
+    if (!ok) {
+      alert('Erro ao cancelar a aposta. Tente novamente.');
+      return;
+    }
+    const fresh = await loadShared();
+    if (fresh) setState(fresh);
   };
 
   const confirmBet = async ({ type, stake, totalOdd, potentialReturn, betCount }) => {
@@ -1490,11 +1541,15 @@ function BettorApp({ me, state, setState, onLogout, onAdminEnter }) {
         status: 'pending_payment', createdAt: baseAt,
       });
     }
-    // Save atomically: reload state, append, save
-    const fresh = (await loadShared()) || state;
-    const updated = { ...fresh, bets: [...(fresh.bets || []), ...newBets] };
-    await saveShared(updated);
-    setState(updated);
+    // Chamada atômica: adiciona as apostas sem risco de sobrescrita
+    const ok = await rpcAddBets(newBets);
+    if (!ok) {
+      alert('Erro ao confirmar sua aposta. Tente novamente em alguns segundos.');
+      return;
+    }
+    // Recarrega o estado completo após a gravação
+    const fresh = await loadShared();
+    if (fresh) setState(fresh);
     setCart([]);
     setCartOpen(false);
     // If single bet (multiple or 1 simple), go to payment. If multiple simples, go to my bets.
@@ -1654,7 +1709,7 @@ function PendingPaymentsTab({ state, updateState }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 5000); return () => clearInterval(t); }, []);
 
-  // Auto-expire bets
+  // Auto-expira apostas pending_payment que passaram do prazo (via RPC atômica)
   useEffect(() => {
     const expired = state.bets.filter(b => {
       if (b.status !== 'pending_payment') return false;
@@ -1662,19 +1717,39 @@ function PendingPaymentsTab({ state, updateState }) {
       return now > expireAt;
     });
     if (expired.length > 0) {
-      updateState(s => ({
-        ...s,
-        bets: s.bets.map(b => expired.some(e => e.id === b.id) ? { ...b, status: 'cancelled', settledAt: new Date().toISOString() } : b),
-      }));
+      (async () => {
+        const ok = await rpcExpireBets(expired.map(b => b.id), new Date().toISOString());
+        if (ok) {
+          const fresh = await loadShared();
+          if (fresh) updateState(() => fresh);
+        }
+      })();
     }
   }, [now, state.bets]);
 
   const pending = state.bets.filter(b => b.status === 'pending_payment')
     .sort((a,b) => a.createdAt.localeCompare(b.createdAt));
 
-  const markPaid = (betId) => updateState(s => ({ ...s, bets: s.bets.map(b => b.id === betId ? { ...b, status:'active', paidAt: new Date().toISOString() } : b) }));
-  const cancel = (betId) => { if (!confirm('Anular essa aposta?')) return;
-    updateState(s => ({ ...s, bets: s.bets.map(b => b.id === betId ? { ...b, status:'cancelled', settledAt: new Date().toISOString() } : b) }));
+  const markPaid = async (betId) => {
+    const ok = await rpcUpdateBetStatus(betId, 'active', { paidAt: new Date().toISOString() });
+    if (ok) {
+      const fresh = await loadShared();
+      if (fresh) updateState(() => fresh);
+    } else {
+      alert('Erro ao confirmar pagamento. Tente novamente.');
+    }
+  };
+
+  const [confirmingCancel, setConfirmingCancel] = useState(null);
+  const cancel = async (betId) => {
+    const ok = await rpcUpdateBetStatus(betId, 'cancelled', { settledAt: new Date().toISOString() });
+    if (ok) {
+      const fresh = await loadShared();
+      if (fresh) updateState(() => fresh);
+    } else {
+      alert('Erro ao anular a aposta. Tente novamente.');
+    }
+    setConfirmingCancel(null);
   };
 
   const bettorOf = (id) => state.bettors.find(b => b.id === id);
@@ -1729,10 +1804,18 @@ function PendingPaymentsTab({ state, updateState }) {
                 <span style={{ fontSize: 13, color: C.accent, fontWeight: 700 }}>{fmtMoney(bet.potentialReturn)}</span>
               </div>
             </div>
-            <div style={{ display:'flex', gap: 6 }}>
-              <button onClick={() => markPaid(bet.id)} style={{ flex: 1, background: C.accent, color: C.bg, border:'none', padding: 9, borderRadius: 6, fontSize: 13, fontWeight: 600, cursor:'pointer', fontFamily:'inherit', display:'inline-flex', alignItems:'center', justifyContent:'center', gap: 5 }}><Check size={14} /> Confirmar pago</button>
-              <button onClick={() => cancel(bet.id)} style={{ background:'transparent', color: C.danger, border:`1px solid ${C.border}`, padding: '9px 14px', borderRadius: 6, fontSize: 13, fontWeight: 600, cursor:'pointer', fontFamily:'inherit' }}><X size={14} /></button>
-            </div>
+            {confirmingCancel === bet.id ? (
+              <div style={{ display:'flex', gap: 6, alignItems:'center', background: 'rgba(239,68,68,0.1)', border:`1px solid rgba(239,68,68,0.3)`, borderRadius: 6, padding: 8 }}>
+                <span style={{ flex: 1, fontSize: 12, color: C.text }}>Anular essa aposta?</span>
+                <button onClick={() => cancel(bet.id)} style={{ background: C.danger, color:'white', border:'none', padding:'6px 12px', borderRadius: 5, fontSize: 12, fontWeight: 600, cursor:'pointer', fontFamily:'inherit' }}>Sim, anular</button>
+                <button onClick={() => setConfirmingCancel(null)} style={{ background:'transparent', color: C.textMuted, border:`1px solid ${C.border}`, padding:'6px 10px', borderRadius: 5, fontSize: 12, fontWeight: 500, cursor:'pointer', fontFamily:'inherit' }}>Não</button>
+              </div>
+            ) : (
+              <div style={{ display:'flex', gap: 6 }}>
+                <button onClick={() => markPaid(bet.id)} style={{ flex: 1, background: C.accent, color: C.bg, border:'none', padding: 9, borderRadius: 6, fontSize: 13, fontWeight: 600, cursor:'pointer', fontFamily:'inherit', display:'inline-flex', alignItems:'center', justifyContent:'center', gap: 5 }}><Check size={14} /> Confirmar pago</button>
+                <button onClick={() => setConfirmingCancel(bet.id)} style={{ background:'transparent', color: C.danger, border:`1px solid ${C.border}`, padding: '9px 14px', borderRadius: 6, fontSize: 13, fontWeight: 600, cursor:'pointer', fontFamily:'inherit' }}><X size={14} /></button>
+              </div>
+            )}
           </div>
         );
       })}
@@ -1971,8 +2054,16 @@ function BettorsTab({ state }) {
 
 function AllBetsTab({ state, updateState }) {
   const [filter, setFilter] = useState('all');
-  const cancel = (id) => { if (!confirm('Anular essa aposta?')) return;
-    updateState(s => ({ ...s, bets: s.bets.map(b => b.id === id ? { ...b, status:'cancelled', settledAt: new Date().toISOString() } : b) }));
+  const [confirmingCancel, setConfirmingCancel] = useState(null);
+  const cancel = async (id) => {
+    const ok = await rpcUpdateBetStatus(id, 'cancelled', { settledAt: new Date().toISOString() });
+    if (ok) {
+      const fresh = await loadShared();
+      if (fresh) updateState(() => fresh);
+    } else {
+      alert('Erro ao anular a aposta. Tente novamente.');
+    }
+    setConfirmingCancel(null);
   };
   const bettorOf = (id) => state.bettors.find(b => b.id === id);
   const filters = [{ id:'all', label:'Todas' },{ id:'pending_payment', label:'Aguardando' },{ id:'active', label:'Ativas' },{ id:'won', label:'Ganhas' },{ id:'lost', label:'Perdidas' },{ id:'cancelled', label:'Anuladas' }];
@@ -2014,10 +2105,17 @@ function AllBetsTab({ state, updateState }) {
             {bet.selections.map((s, i) => (
               <div key={i} style={{ fontSize: 11, color: C.textMuted, marginBottom: 2 }}>{s.label} <span style={{ color: C.accent, fontWeight: 600 }}>{fmtOdd(s.odd)}</span></div>
             ))}
-            <div style={{ display:'flex', justifyContent:'space-between', fontSize: 11, marginTop: 6, paddingTop: 6, borderTop: `1px solid ${C.border}` }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', fontSize: 11, marginTop: 6, paddingTop: 6, borderTop: `1px solid ${C.border}` }}>
               <span style={{ color: C.textMuted }}>{fmtMoney(bet.stake * bet.betCount)} → {fmtMoney(bet.potentialReturn)}</span>
               {(bet.status === 'active' || bet.status === 'pending_payment') && (
-                <button onClick={() => cancel(bet.id)} style={{ background:'none', border:'none', color: C.danger, cursor:'pointer', fontSize: 11, padding: 0, fontFamily:'inherit' }}>Anular</button>
+                confirmingCancel === bet.id ? (
+                  <span style={{ display:'flex', gap: 5, alignItems:'center' }}>
+                    <button onClick={() => cancel(bet.id)} style={{ background: C.danger, color:'white', border:'none', padding:'4px 8px', borderRadius: 4, fontSize: 10, fontWeight: 600, cursor:'pointer', fontFamily:'inherit' }}>Confirmar</button>
+                    <button onClick={() => setConfirmingCancel(null)} style={{ background:'transparent', color: C.textMuted, border:`1px solid ${C.border}`, padding:'4px 8px', borderRadius: 4, fontSize: 10, fontWeight: 500, cursor:'pointer', fontFamily:'inherit' }}>Não</button>
+                  </span>
+                ) : (
+                  <button onClick={() => setConfirmingCancel(bet.id)} style={{ background:'none', border:'none', color: C.danger, cursor:'pointer', fontSize: 11, padding: 0, fontFamily:'inherit' }}>Anular</button>
+                )
               )}
             </div>
           </div>
@@ -2352,37 +2450,18 @@ export default function App() {
 
   const handleOnboard = async (data) => {
     const newBettor = { id: newId('u_'), ...data, createdAt: new Date().toISOString() };
-    // Carrega o estado mais recente do banco
+    // Chamada atômica: o banco serializa, ninguém sobrescreve ninguém.
+    // Se já existir cpf+phone igual, o banco retorna o existente.
+    const result = await rpcAddBettor(newBettor);
+    if (!result) {
+      alert('Erro ao salvar seu cadastro. Verifique sua internet e tente novamente.');
+      return;
+    }
+    // Recarrega o estado completo do banco
     const fresh = await loadShared();
-    if (!fresh) {
-      alert('Não foi possível conectar ao servidor. Verifique sua internet e tente novamente.');
-      return;
-    }
-    // Já existe esse cpf+telefone?
-    const existing = (fresh.bettors || []).find(b => b.cpf === data.cpf && b.phone === data.phone);
-    let bettor;
-    if (existing) {
-      bettor = existing;
-      // Garante que o cadastro local aponta pro apostador certo
-      await saveMe(bettor);
-      setMe(bettor);
-      setState(fresh);
-      return;
-    }
-    // Novo apostador: adiciona e salva
-    bettor = newBettor;
-    const updated = { ...fresh, bettors: [...(fresh.bettors || []), newBettor] };
-    await saveShared(updated);
-    // Confirma que realmente gravou no banco antes de prosseguir
-    const verify = await loadShared();
-    const saved = verify && (verify.bettors || []).some(b => b.id === newBettor.id);
-    if (!saved) {
-      alert('Erro ao salvar seu cadastro no servidor. Tente novamente em alguns segundos.');
-      return;
-    }
-    setState(verify);
-    await saveMe(bettor);
-    setMe(bettor);
+    if (fresh) setState(fresh);
+    await saveMe(result);
+    setMe(result);
   };
 
   const logout = async () => {
